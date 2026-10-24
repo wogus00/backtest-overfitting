@@ -26,3 +26,4 @@ def random_walk_seasonal(n_days=1000, initial_price=100.0, sigma=0.01, seed=42):
     prices = initial_price * np.exp(np.cumsum(returns))
 
     return prices
+
