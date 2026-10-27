@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 from synthetic_data import random_walk, random_walk_seasonal
 from strategies import generate_strategy_configurations, generate_strategy_returns
-from performance_metrics import sharpe_ratio, sortino_ratio, evaluate_strategies
+from performance_metrics import sharpe_ratio, sortino_ratio, evaluate_strategies, maximum_drawdown, probabilistic_sharpe_ratio
 from cscv import cscv
 from overfit_statistics import performance_degradation, stochastic_dominance, compute_pbo, probability_of_loss
 from cscv_validation import (validate_effect_of_S, 
@@ -16,49 +16,40 @@ from cscv_validation import (validate_effect_of_S,
 
 
 
-def get_prices(generate=False):
-    prices_dir = Path("data/prices/synthetic")
-    if generate:
-        prices_no_signal = random_walk(n_days=1000, sigma=0.01, seed=42)
-        prices_seasonal = random_walk_seasonal(n_days=1000, sigma=0.01, seed=42)
-        prices_dir.mkdir(parents=True, exist_ok=True)
+def get_prices(prices_dir, seed=42):
+    prices_no_signal = random_walk(n_days=1000, sigma=0.01, seed=seed)
+    prices_seasonal = random_walk_seasonal(n_days=1000, sigma=0.01, seed=seed)
+    prices_dir.mkdir(parents=True, exist_ok=True)
 
-        pd.DataFrame({"price": prices_no_signal}).to_parquet(prices_dir / "no_signal.parquet", index=False)
-        pd.DataFrame({"price": prices_seasonal}).to_parquet(prices_dir / "seasonal.parquet", index=False)
-
-    else:
-        prices_no_signal = pd.read_parquet(prices_dir / "no_signal.parquet")["price"].to_numpy()
-
-        prices_seasonal = pd.read_parquet(prices_dir / "seasonal.parquet")["price"].to_numpy()
+    pd.DataFrame({"price": prices_no_signal}).to_parquet(prices_dir / "no_signal.parquet", index=False)
+    pd.DataFrame({"price": prices_seasonal}).to_parquet(prices_dir / "seasonal.parquet", index=False)
 
     return prices_no_signal, prices_seasonal
 
 
-def get_strategies(generate=False):
-    configurations_path = Path("data/strategy_configurations.parquet")
-    returns_dir = Path("results/returns")
+def get_strategies(directory, price_dir):
+    configurations_path = directory / "strategy_configurations.parquet"
 
-    if generate:
-        configurations = generate_strategy_configurations()
-        prices_no_signal, prices_seasonal = get_prices()
+    returns_dir = directory / "returns"
 
-        dates = pd.bdate_range(start="2020-01-01", periods=len(prices_no_signal))
-        prices_no_signal = pd.Series(prices_no_signal, index=dates, name="price")
-        prices_seasonal = pd.Series(prices_seasonal, index=dates, name="price")
+    configurations = generate_strategy_configurations()
 
-        returns_no_signal = generate_strategy_returns(prices_no_signal, configurations)
-        returns_seasonal = generate_strategy_returns(prices_seasonal, configurations)
+    prices_no_signal = pd.read_parquet(price_dir / "no_signal.parquet")["price"].to_numpy()
+    prices_seasonal = pd.read_parquet(price_dir / "seasonal.parquet")["price"].to_numpy()
 
-        configurations_path.parent.mkdir(parents=True, exist_ok=True)
-        returns_dir.mkdir(parents=True, exist_ok=True)
 
-        configurations.to_parquet(configurations_path, index=False)
-        returns_no_signal.to_parquet(returns_dir / "no_signal.parquet")
-        returns_seasonal.to_parquet(returns_dir / "seasonal.parquet")
-    else:
-        configurations = pd.read_parquet(configurations_path)
-        returns_no_signal = pd.read_parquet(returns_dir / "no_signal.parquet")
-        returns_seasonal = pd.read_parquet(returns_dir / "seasonal.parquet")
+    dates = pd.bdate_range(start="2020-01-01", periods=len(prices_no_signal))
+    prices_no_signal = pd.Series(prices_no_signal, index=dates, name="price")
+    prices_seasonal = pd.Series(prices_seasonal, index=dates, name="price")
+
+    returns_no_signal = generate_strategy_returns(prices_no_signal, configurations)
+    returns_seasonal = generate_strategy_returns(prices_seasonal, configurations)
+
+    returns_dir.mkdir(parents=True, exist_ok=True)
+
+    configurations.to_parquet(configurations_path, index=False)
+    returns_no_signal.to_parquet(returns_dir / "no_signal.parquet")
+    returns_seasonal.to_parquet(returns_dir / "seasonal.parquet")
 
     return configurations, returns_no_signal, returns_seasonal
 
@@ -67,6 +58,8 @@ def measure_performance(returns, configurations):
     performance = evaluate_strategies(returns)
 
     return performance.merge(configurations,on="strategy_id",how="left",validate="one_to_one")
+
+
 
 def score_columns(matrix, metric=sharpe_ratio):
     matrix = np.asarray(matrix, dtype=float)
@@ -142,13 +135,15 @@ def run_validation(
     return validation
 
 
-def save_results(dataset_name,
+def save_results(
+                output_directory,
+                dataset_name,
                  performance,
                  cscv_results,
                  summary,
                  dominance,
                  validation):
-    output_dir = Path("results") / dataset_name / summary["metric"]
+    output_dir = Path(output_directory) / dataset_name / summary["metric"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
     performance.to_parquet(output_dir / "performance.parquet", index=False)
@@ -167,58 +162,100 @@ def save_results(dataset_name,
 
     return output_dir
 
-def plot():
-    return NotImplementedError
+
+def main(experiment_name, n_times=5, real_data=False, base_seed=42, S=8):
+    metrics = {
+        "sharpe": sharpe_ratio,
+        # "sortino": sortino_ratio,
+        # "max_drawdown": maximum_drawdown,
+        # "probabilistic_sharpe": probabilistic_sharpe_ratio
+    }
+
+    print(f"Experiment: {experiment_name}")
+    DATA_DIR = Path(f"data/{experiment_name}")
+    RESULT_DIR = Path(f"result/{experiment_name}")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+
+    results = {}
+    if not real_data:
+        for i in range(n_times):
+
+            seed = base_seed + i
+            curr_data_dir = DATA_DIR / f"seed_{seed}"
+            curr_results_dir = RESULT_DIR / f"seed_{seed}"
+
+            print(f"Running simulation {i+1}/{n_times}, seed={seed}")
+
+            # 1. Generate synthetic prices using the current seed
+            get_prices(curr_data_dir, seed=seed)
+
+            # 2. Generate strategy returns for both datasets
+            configurations, returns_no_signal, returns_seasonal = get_strategies(curr_results_dir, curr_data_dir)
+            datasets = {"no_signal": returns_no_signal,"seasonal": returns_seasonal}
+
+
+            # for each dataset, compute performance metrics, run CSCV, and save results
+            for dataset_name, returns in datasets.items():
+                # compute performance metrics
+                performance = measure_performance(returns, configurations)   
+                validation = run_validation(
+                    returns,
+                    S_values=[
+                        s for s in [4, 8, 16]
+                        if s <= len(returns) and len(returns) % s == 0],
+                    N_values=sorted({
+                        n for n in [10, 50, 100, 500, 1000, returns.shape[1]]
+                        if 2 <= n <= returns.shape[1]}),
+                    S=S)
+
+                # run for each performance metric
+                for performance_metric, metric_func in metrics.items():
+
+                    # run CSCV and compute statistics for each performance metric
+                    cscv_results = run_cscv(
+                        returns,
+                        S=S,
+                        metric=metric_func)
+
+                    summary, dominance = compute_statistics(cscv_results, metric_name=performance_metric, benchmark=0.0)
+                    output_directory = curr_results_dir
+                    output_dir = save_results(
+                        output_directory,
+                        dataset_name=dataset_name,
+                        performance=performance,
+                        cscv_results=cscv_results,
+                        summary=summary,
+                        dominance=dominance,
+                        validation=validation,
+                    )
+
+                    results[(seed, dataset_name, performance_metric)] = summary
+                    print(f"Saved to {output_dir}")
+                
+    
+    else:
+        # handle real data case
+        pass # for now
+
+
+    print("\nAll simulations completed.")
+    print("Final results:")
+
+    for (seed, dataset_name, metric_name), result in results.items():
+        print(f"\nSeed: {seed}, Dataset: {dataset_name}, Metric: {metric_name}")
+        print(pd.Series(result).to_string())
+
+
+    
+
 
 if __name__ == "__main__":
-    GENERATE_PRICES = True
-    GENERATE_STRATEGIES = True
-    S = 8
 
-    if GENERATE_PRICES:
-        get_prices(generate=True)
-
-    configurations, returns_no_signal, returns_seasonal = get_strategies(generate=GENERATE_STRATEGIES or GENERATE_PRICES)
-
-    datasets = {"no_signal": returns_no_signal,"seasonal": returns_seasonal}
-
-    metrics = {"sharpe": sharpe_ratio}
-
-    for dataset_name, returns in datasets.items():
-        print(f"\nDataset: {dataset_name}")
-
-        # These calculations do not depend on the CSCV selection metric.
-        performance = measure_performance(returns, configurations)
-
-        validation = run_validation(
-            returns,
-            S_values=[
-                s for s in [4, 8, 16]
-                if s <= len(returns) and len(returns) % s == 0],
-            N_values=sorted({
-                n for n in [10, 50, 100, 500, 1000, returns.shape[1]]
-                if 2 <= n <= returns.shape[1]}),S=S)
-
-        for metric_name, metric in metrics.items():
-            print(f"Running CSCV with {metric_name}...")
-
-            cscv_results = run_cscv(
-                returns,
-                S=S,
-                metric=metric)
-
-            summary, dominance = compute_statistics(cscv_results, 
-                                                    metric_name=metric_name,
-                                                    benchmark=0.0)
-
-            output_dir = save_results(
-                dataset_name=dataset_name,
-                performance=performance,
-                cscv_results=cscv_results,
-                summary=summary,
-                dominance=dominance,
-                validation=validation,
-            )
-
-            print(pd.Series(summary).to_string())
-            print(f"Saved to {output_dir}")
+    main(
+        experiment_name="test_experiment",
+        n_times=2,
+        real_data=False,
+        base_seed=42,
+        S=8
+    )
