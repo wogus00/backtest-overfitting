@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from synthetic_data import random_walk, random_walk_seasonal
-from strategies import generate_strategy_configurations, generate_strategy_returns
+from strategies import generate_strategy_configurations, generate_strategy_returns, generate_strategy_returns_old
 from performance_metrics import sharpe_ratio, sortino_ratio, evaluate_strategies, maximum_drawdown, probabilistic_sharpe_ratio
 from cscv import cscv
 from overfit_statistics import performance_degradation, stochastic_dominance, compute_pbo, probability_of_loss
@@ -12,7 +12,7 @@ from cscv_validation import (validate_effect_of_S,
                              validate_autocorrelation_preservation, 
                              validate_pbo_accuracy, 
                              validate_model_free)
-
+import time
 
 
 
@@ -188,17 +188,27 @@ def main(experiment_name, n_times=5, real_data=False, base_seed=42, S=8):
             print(f"Running simulation {i+1}/{n_times}, seed={seed}")
 
             # 1. Generate synthetic prices using the current seed
+            start_time = time.time()
             get_prices(curr_data_dir, seed=seed)
+            end_time = time.time()
+            print(f"Price generation took {end_time - start_time:.2f} seconds.")
 
             # 2. Generate strategy returns for both datasets
+            start_time = time.time()
             configurations, returns_no_signal, returns_seasonal = get_strategies(curr_results_dir, curr_data_dir)
+            end_time = time.time()
+            print(f"Strategy generation took {end_time - start_time:.2f} seconds.")
             datasets = {"no_signal": returns_no_signal,"seasonal": returns_seasonal}
 
 
             # for each dataset, compute performance metrics, run CSCV, and save results
             for dataset_name, returns in datasets.items():
                 # compute performance metrics
+                start_time = time.time()
                 performance = measure_performance(returns, configurations)   
+                end_time = time.time()
+                print(f"Performance measurement for {dataset_name} took {end_time - start_time:.2f} seconds.")
+                start_time = time.time()
                 validation = run_validation(
                     returns,
                     S_values=[
@@ -208,17 +218,25 @@ def main(experiment_name, n_times=5, real_data=False, base_seed=42, S=8):
                         n for n in [10, 50, 100, 500, 1000, returns.shape[1]]
                         if 2 <= n <= returns.shape[1]}),
                     S=S)
+                end_time = time.time()
+                print(f"Validation checks for {dataset_name} took {end_time - start_time:.2f} seconds.")
 
                 # run for each performance metric
                 for performance_metric, metric_func in metrics.items():
 
                     # run CSCV and compute statistics for each performance metric
+                    start_time = time.time()
                     cscv_results = run_cscv(
                         returns,
                         S=S,
                         metric=metric_func)
+                    end_time = time.time()
+                    print(f"CSCV for {dataset_name} with metric {performance_metric} took {end_time - start_time:.2f} seconds.")
 
+                    start_time = time.time()
                     summary, dominance = compute_statistics(cscv_results, metric_name=performance_metric, benchmark=0.0)
+                    end_time = time.time()
+                    print(f"Statistics computation for {dataset_name} with metric {performance_metric} took {end_time - start_time:.2f} seconds.")
                     output_directory = curr_results_dir
                     output_dir = save_results(
                         output_directory,
@@ -254,8 +272,8 @@ if __name__ == "__main__":
 
     main(
         experiment_name="test_experiment",
-        n_times=2,
+        n_times=1,
         real_data=False,
-        base_seed=42,
+        base_seed=45,
         S=8
     )

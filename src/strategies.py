@@ -177,7 +177,7 @@ def run_seasonal_strategy(
 # 3. GENERATE RETURNS FOR ALL STRATEGIES
 
 
-def generate_strategy_returns(prices, configurations):
+def generate_strategy_returns_old(prices, configurations):
     """
     Run all seasonal configurations on one price series.
 
@@ -228,6 +228,86 @@ def generate_strategy_returns(prices, configurations):
     )
 
     return strategy_matrix
+
+def generate_strategy_returns(prices, configurations):
+    if not isinstance(prices, pd.Series):
+        raise TypeError("prices must be a Pandas Series.")
+
+    if not isinstance(prices.index, pd.DatetimeIndex):
+        raise TypeError("prices must have a DatetimeIndex.")
+
+    # Precompute data once
+    prices_array = prices.to_numpy(dtype=float)
+
+    asset_returns = prices.astype(float).pct_change().fillna(0.0)
+    returns_array = asset_returns.to_numpy()
+
+    volatility = (
+        asset_returns.rolling(20).std().shift(1).to_numpy()
+    )
+
+    # Precompute monthly indices once
+    months = prices.index.to_period("M")
+    month_indices = [
+        np.flatnonzero(months == month)
+        for month in months.unique()
+    ]
+
+    T = len(prices)
+    N = len(configurations)
+
+    # Preallocate return matrix
+    strategy_matrix = np.zeros((T, N), dtype=float)
+
+    for col, strategy in enumerate(configurations.itertuples(index=False)):
+        entry_day = int(strategy.entry_day)
+        holding_period = int(strategy.holding_period)
+        stop_loss = float(strategy.stop_loss)
+        side = int(strategy.side)
+
+        last_exit = -1
+
+        for indices in month_indices:
+
+            if entry_day > len(indices):
+                continue
+
+            entry_idx = indices[entry_day - 1]
+
+            if entry_idx <= last_exit:
+                continue
+
+            if np.isnan(volatility[entry_idx]):
+                continue
+
+            entry_price = prices_array[entry_idx]
+            stop_threshold = stop_loss * volatility[entry_idx]
+
+            exit_limit = min(
+                entry_idx + holding_period,
+                T - 1
+            )
+
+            for i in range(entry_idx + 1, exit_limit + 1):
+
+                strategy_matrix[i, col] = side * returns_array[i]
+
+                cumulative_return = side * (
+                    prices_array[i] / entry_price - 1
+                )
+
+                if cumulative_return <= -stop_threshold:
+                    last_exit = i
+                    break
+
+            else:
+                last_exit = exit_limit
+
+    return pd.DataFrame(
+        strategy_matrix,
+        index=prices.index,
+        columns=configurations["strategy_id"].to_numpy()
+    )
 
 
 # 4. SMALL TEST (RUNS ONLY WHEN EXECUTING THIS FILE)
