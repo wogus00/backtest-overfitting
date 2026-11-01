@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+*.egg-info/
+/build/
+/dist/
 
 # Virtual environments
 .venv/
@@ -17,6 +20,7 @@ venv/
 # Generated simulation data, results, and figures
 /data/
 /result/
+/results/
 /src/results/
 
 # Notebook checkpoints

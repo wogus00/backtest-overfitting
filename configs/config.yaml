@@ -1,0 +1,4 @@
+experiment: demo_experiment
+seed: 42
+blocks: 12
+n_days: 1008

@@ -4,7 +4,7 @@ import pandas as pd
 from tqdm import tqdm
 from itertools import combinations
 from scipy.stats import rankdata
-from performance_metrics import column_sharpe_ratios, column_pnl_sharpe_ratios
+from .performance_metrics import column_sharpe_ratios, column_pnl_sharpe_ratios
 
 
 def split_blocks(M, S=16):

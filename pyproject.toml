@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "backtest-overfitting"
+version = "0.1.0"
+description = "Backtest overfitting experiments using PBO and CSCV"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "matplotlib",
+    "scipy",
+    "tqdm",
+    "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["backtest_overfitting*"]
+namespaces = false

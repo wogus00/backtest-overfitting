@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from cscv import split_blocks, generate_combinations
+from .cscv import split_blocks, generate_combinations
 
 def create_time_blocks(strategy_matrix, S=8):
     """

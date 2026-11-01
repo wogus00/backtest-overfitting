@@ -1,12 +1,13 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from synthetic_data import random_walk, random_walk_seasonal, simulation_dates
-from strategies import generate_strategy_configurations, generate_strategy_returns
-from performance_metrics import sharpe_ratio, column_sharpe_ratios, evaluate_pnl_strategies, calendar_day_weights
-from cscv import cscv, split_blocks
-from overfit_statistics import performance_degradation, stochastic_dominance, compute_pbo, probability_of_loss
-from cscv_validation import (validate_effect_of_S, 
+from . import paths
+from .synthetic_data import random_walk, random_walk_seasonal, simulation_dates
+from .strategies import generate_strategy_configurations, generate_strategy_returns
+from .performance_metrics import sharpe_ratio, column_sharpe_ratios, evaluate_pnl_strategies, calendar_day_weights
+from .cscv import cscv, split_blocks
+from .overfit_statistics import performance_degradation, stochastic_dominance, compute_pbo, probability_of_loss
+from .cscv_validation import (validate_effect_of_S, 
                              validate_effect_of_N, 
                              validate_temporal_dependence, 
                              validate_pbo_accuracy)
@@ -180,19 +181,20 @@ def main(experiment_name, n_times=1, real_data=False, base_seed=1, S=8, n_days=1
     split_blocks(np.empty((n_days, 1)), S)
     if isinstance(n_times, bool) or not isinstance(n_times, int) or n_times < 1:
         raise ValueError("n_times must be a positive integer.")
-    data_dir = Path("data") / experiment_name
-    result_dir = Path("result") / experiment_name
     for seed in range(base_seed, base_seed + n_times):
-        if (data_dir / f"seed_{seed}").exists() or (result_dir / f"seed_{seed}").exists():
+        if any(directory.exists() for directory in (
+                paths.data_dir(experiment_name, seed), paths.processed_dir(experiment_name, seed),
+                paths.result_dir(experiment_name, seed))):
             raise FileExistsError("Use a new experiment name; existing seed outputs are preserved.")
     results = {}
     for seed in range(base_seed, base_seed + n_times):
-        current_data = data_dir / f"seed_{seed}"
-        current_results = result_dir / f"seed_{seed}"
+        current_data = paths.data_dir(experiment_name, seed)
+        current_processed = paths.processed_dir(experiment_name, seed)
+        current_results = paths.result_dir(experiment_name, seed)
         print(f"Experiment: {experiment_name}; seed={seed}; T={n_days}; S={S}")
         get_prices(current_data, seed=seed, n_days=n_days)
-        configurations, ordinary, seasonal = get_strategies(current_results, current_data)
-        metadata = dict(seed=seed, S=S, T=n_days, sigma=1., units="price_unit_pnl",
+        configurations, ordinary, seasonal = get_strategies(current_processed, current_data)
+        metadata = dict(experiment=experiment_name, seed=seed, S=S, T=n_days, sigma=1., units="price_unit_pnl",
                         source="https://www.quantresearch.org/CSCV_3.py.txt",
                         calendar="Monday-Thursday from 2000-01-01 (literal source)",
                         rng="random.Random(seed).gauss; paired shocks across scenarios",
@@ -201,6 +203,7 @@ def main(experiment_name, n_times=1, real_data=False, base_seed=1, S=8, n_days=1
                         eligibility="fixed universe with >2 records and positive variance in every half-split",
                         dominance_benchmark="mean OOS Sharpe across eligible strategies per split",
                         reproduction="source-style simulation; original figure seed and CSCV conventions unverified")
+        current_results.mkdir(parents=True, exist_ok=True)
         (current_results / "experiment.json").write_text(json.dumps(metadata, indent=2) + "\n")
         for name, pnl in (("no_signal", ordinary), ("seasonal", seasonal)):
             cscv_results = run_cscv(pnl, S=S)
@@ -216,7 +219,7 @@ def main(experiment_name, n_times=1, real_data=False, base_seed=1, S=8, n_days=1
             summary, dominance = compute_statistics(cscv_results, "sharpe", benchmark=0.)
             summary.update(S=S, T=len(pnl), n_strategies=len(ids),
                            n_excluded_strategies=len(pnl.columns) - len(ids), units="price_unit_pnl")
-            output = save_results(current_results, name, performance, cscv_results,
+            output = save_results(paths.tables_dir(experiment_name, seed), name, performance, cscv_results,
                                   summary, dominance, validation)
             results[(seed, name)] = summary
             print(f"Saved {output}: PBO={summary['pbo']:.2%}, loss={summary['probability_of_loss']:.2%}")

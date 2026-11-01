@@ -19,7 +19,7 @@ def _validate_prices(prices):
 
 def _entry_positions(dates):
     months = dates.to_period("M")
-    ordinals = pd.Series(1, index=dates).groupby(months).cumsum().to_numpy()
+    ordinals = pd.Series(1, index=dates).groupby(months).cumsum().to_numpy(copy=True)
     first = dates[0].normalize().replace(day=1)
     interior = pd.date_range(first + pd.Timedelta(days=1),
                              dates[0].normalize() - pd.Timedelta(days=1))
@@ -136,7 +136,7 @@ generate_strategy_returns_old = generate_strategy_returns
 
 
 if __name__ == "__main__":
-    from synthetic_data import random_walk_seasonal, simulation_dates
+    from .synthetic_data import random_walk_seasonal, simulation_dates
 
     dates = simulation_dates(100)
     prices = pd.Series(random_walk_seasonal(n_days=100), index=dates)

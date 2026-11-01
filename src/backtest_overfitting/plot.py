@@ -1,16 +1,15 @@
 """Plot saved Sharpe experiments, replaying OOS scoring for pooled dominance.
 
-Run: python src/plot.py --experiment paper_source_S8 --seed 1
+Run: python -m backtest_overfitting.plot --experiment paper_source_S8 --seed 1
 Requires numpy, pandas, pyarrow, and matplotlib.
 """
-from pathlib import Path
 import argparse
 import math
 
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
+from . import paths
 
 
 def require_finite(frame, columns, label):
@@ -20,10 +19,10 @@ def require_finite(frame, columns, label):
 
 def pooled_dominance(returns, saved_cscv, S, is_pnl):
     """Pool individual scores across every OOS split of the saved universe."""
-    from cscv import split_blocks, generate_combinations
-    from performance_metrics import (calendar_day_weights, column_pnl_sharpe_ratios,
+    from .cscv import split_blocks, generate_combinations
+    from .performance_metrics import (calendar_day_weights, column_pnl_sharpe_ratios,
                                      column_sharpe_ratios)
-    from overfit_statistics import stochastic_dominance
+    from .overfit_statistics import stochastic_dominance
     from tqdm import tqdm
 
     blocks = split_blocks(returns.to_numpy(dtype=float), S)
@@ -58,8 +57,7 @@ def pooled_dominance(returns, saved_cscv, S, is_pnl):
 
 
 def load_dataset(experiment, seed, name):
-    base = ROOT / "result" / experiment / f"seed_{seed}"
-    scores = base / name / "sharpe"
+    scores = paths.tables_dir(experiment, seed) / name / "sharpe"
     cscv = pd.read_parquet(scores / "cscv.parquet")
     performance = pd.read_parquet(scores / "performance.parquet")
     summary = pd.read_csv(scores / "summary.csv").iloc[0]
@@ -68,19 +66,19 @@ def load_dataset(experiment, seed, name):
     if candidates.empty:
         raise ValueError(f"{name}: no finite full-sample Sharpe ratios")
     best = candidates.loc[candidates["sharpe"].idxmax()]
-    returns = pd.read_parquet(base / "returns" / f"{name}.parquet")
+    returns = pd.read_parquet(paths.processed_dir(experiment, seed) / "returns" / f"{name}.parquet")
     sid = best["strategy_id"]
     if sid not in returns.columns:
         raise ValueError(f"{name}: strategy ID {sid} missing from returns")
     price_frame = pd.read_parquet(
-        ROOT / "data" / experiment / f"seed_{seed}" / f"{name}.parquet"
+        paths.data_dir(experiment, seed) / f"{name}.parquet"
     )
     prices = price_frame["price"]
     is_pnl = "oos_total_pnl" in cscv
     if len(prices) != len(returns) or not returns.index.is_unique:
         raise ValueError(f"{name}: prices and return dates do not align")
     if is_pnl:
-        from performance_metrics import pnl_sharpe_ratio
+        from .performance_metrics import pnl_sharpe_ratio
         if "date" not in price_frame or not returns.index.equals(pd.DatetimeIndex(price_frame["date"])):
             raise ValueError(f"{name}: stored price dates do not match P&L dates")
         require_finite(returns[[sid]].dropna(), [sid], name)
@@ -258,19 +256,25 @@ def main():
     parser.add_argument("--experiment", default="paper_source_S8")
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
-    datasets = [load_dataset(args.experiment, args.seed, name)
+    plot_experiment(args.experiment, args.seed)
+
+
+def plot_experiment(experiment, seed):
+    datasets = [load_dataset(experiment, seed, name)
                 for name in ("no_signal", "seasonal")]
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    output = ROOT / "result" / args.experiment / f"seed_{args.seed}" / "figures"
+    output = paths.figures_dir(experiment, seed)
     output.mkdir(parents=True, exist_ok=True)
+    tables = paths.tables_dir(experiment, seed)
+    tables.mkdir(parents=True, exist_ok=True)
     for label, data in zip(("no_signal", "seasonal"), datasets):
-        data["dominance"].to_parquet(output / f"{label}_pooled_dominance.parquet", index=False)
+        data["dominance"].to_parquet(tables / f"{label}_pooled_dominance.parquet", index=False)
     pd.DataFrame([{"scenario": label, **data["dominance_summary"]}
                   for label, data in zip(("no_signal", "seasonal"), datasets)]).to_csv(
-                      output / "pooled_dominance_summary.csv", index=False)
+                      tables / "pooled_dominance_summary.csv", index=False)
     plots = [("backtest", plot_backtest), ("degradation", plot_degradation),
              ("logits", plot_logits), ("dominance", plot_dominance)]
     with plt.rc_context(PAPER_STYLE):

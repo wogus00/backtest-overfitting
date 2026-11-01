@@ -6,39 +6,22 @@ seasonal experiments, NOT reproductions of the paper's unavailable examples.
 Figures 9/13 compare the IS-selected OOS Sharpe distribution with the
 complete pooled OOS strategy-score distribution, recalculated from returns.
 
-Run: python plotting_all_13.py
+Run: python -m backtest_overfitting.plotting (requires legacy data layout)
 Requirements: numpy pandas matplotlib pyarrow
 No strategy recalculation, no modification of existing files.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from itertools import combinations
 from math import comb
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from . import paths
 
-HERE = Path(__file__).resolve().parent
-ROOT_CANDIDATES = [
-    HERE, HERE.parent,
-    Path.home() / 'backtest-overfitting' / 'backtest-overfitting',
-]
+DATA_DIR = RESULT_DIR = OUT = None
 
-def locate_data():
-    for root in ROOT_CANDIDATES:
-        if (root/'results/no_signal/sharpe/cscv.parquet').exists() and (root/'results/seasonal/sharpe/cscv.parquet').exists():
-            return root
-    raise FileNotFoundError('Could not find experiment Parquet files. Edit ROOT_CANDIDATES near the top.')
-
-ROOT = locate_data()
-# Save all 13 plots inside the project's results/figures folder
-OUT = ROOT / 'results' / 'figures'
-
-# Create the folder if it doesn't already exist
-OUT.mkdir(parents=True, exist_ok=True)
-plt.rcParams.update({'font.family':'serif','font.size':10,'axes.titlesize':11,'axes.labelsize':10,'figure.dpi':120})
 
 
 def save(fig, number, slug):
@@ -49,12 +32,12 @@ def save(fig, number, slug):
 
 
 def read_dataset(name):
-    b=ROOT/'results'/name/'sharpe'
+    b=RESULT_DIR/name/'sharpe'
     return {
         'cscv':pd.read_parquet(b/'cscv.parquet'),
         'performance':pd.read_parquet(b/'performance.parquet'),
-        'returns_path':ROOT/'results/returns'/f'{name}.parquet',
-        'prices_path':ROOT/'data/prices/synthetic'/f'{name}.parquet',
+        'returns_path':RESULT_DIR/'returns'/f'{name}.parquet',
+        'prices_path':DATA_DIR/f'{name}.parquet',
     }
 
 
@@ -220,7 +203,12 @@ def figure6or10(number,ds,label):
 
 
 def main():
-    print('Loading data from:',ROOT)
+    global DATA_DIR, RESULT_DIR, OUT
+    DATA_DIR, RESULT_DIR = paths.legacy_directories()
+    OUT = RESULT_DIR / 'figures'
+    OUT.mkdir(parents=True, exist_ok=True)
+    plt.rcParams.update({'font.family':'serif','font.size':10,'axes.titlesize':11,'axes.labelsize':10,'figure.dpi':120})
+    print('Loading data from:',RESULT_DIR)
     print('Writing images to:',OUT)
     a=read_dataset('no_signal');b=read_dataset('seasonal')
     figure1()
