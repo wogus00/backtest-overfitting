@@ -1,0 +1,27 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Generated simulation data, results, and figures
+/data/
+/result/
+/src/results/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Personal editor and OS files
+.vscode/
+.DS_Store
