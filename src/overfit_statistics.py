@@ -2,33 +2,54 @@ from scipy.stats import linregress
 import numpy as np
 
 
+def _finite_columns(frame, columns):
+    values = frame[columns].to_numpy(dtype=float)
+    if len(values) == 0 or not np.isfinite(values).all():
+        raise ValueError(f"Expected nonempty, finite {columns}.")
+    return values
+
+
 def compute_pbo(cscv_results):
-    logits = cscv_results["logit"]
+    logits = _finite_columns(cscv_results, ["logit"])
     return (logits < 0).mean()
 
 
 def performance_degradation(cscv_results):
-    is_performance = cscv_results["performance_is"]
-    oos_performance = cscv_results["performance_oos"]
+    is_performance, oos_performance = _finite_columns(
+        cscv_results, ["performance_is", "performance_oos"]
+    ).T
+    if len(is_performance) < 2 or np.ptp(is_performance) == 0:
+        return {"slope": np.nan, "intercept": np.nan, "R^2": np.nan, "defined": False}
 
     regression = linregress(is_performance, oos_performance)
 
     result = {
         "slope": regression.slope,
         "intercept": regression.intercept,
-        "R^2": regression.rvalue ** 2
+        "R^2": regression.rvalue ** 2 if np.ptp(oos_performance) > 0 else np.nan,
+        "defined": True,
     }
 
     return result
 
 
 def probability_of_loss(cscv_results):
-    oos_returns = cscv_results["oos_total_return"]
-    return (oos_returns < 0).mean()
+    oos_scores = _finite_columns(cscv_results, ["performance_oos"])
+    return (oos_scores < 0).mean()
 
-def stochastic_dominance(cscv_results):
-    selected = cscv_results["performance_oos"].to_numpy()
-    benchmark = cscv_results["benchmark_oos"].to_numpy()
+def stochastic_dominance(cscv_results, benchmark_scores=None):
+    """Empirical dominance against split means, or an explicit score population.
+
+    Each empirical distribution has its own denominator, so a pooled benchmark
+    need not have the same number of observations as the selected distribution.
+    """
+    selected = _finite_columns(cscv_results, ["performance_oos"])[:, 0]
+    if benchmark_scores is None:
+        benchmark = _finite_columns(cscv_results, ["benchmark_oos"])[:, 0]
+    else:
+        benchmark = np.asarray(benchmark_scores, dtype=float)
+        if benchmark.ndim != 1 or not len(benchmark) or not np.isfinite(benchmark).all():
+            raise ValueError("Expected a nonempty, finite 1D benchmark score population.")
 
     # Evaluate empirical CDFs at all observed values
     x = np.unique(np.concatenate([selected, benchmark]))
@@ -57,9 +78,7 @@ def stochastic_dominance(cscv_results):
     # Second-order stochastic dominance
     sd2 = np.zeros(len(x))
 
-    for i in range(1, len(x)):
-        width = x[i] - x[i - 1]
-        sd2[i] = sd2[i - 1] + difference[i - 1] * width
+    sd2[1:] = np.cumsum(difference[:-1] * np.diff(x))
 
     ssd = (
         np.all(sd2 >= -tol)
