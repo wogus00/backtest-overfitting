@@ -46,11 +46,9 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-Dependencies are defined in `pyproject.toml`. The `dev` extras include
-Jupyter for running the walkthrough notebook.
+Dependencies are defined in `pyproject.toml`. The `dev` extras include Jupyter for running the walkthrough notebook.
 
-Source code lives in the `backtest_overfitting` package under `src/`.
-Shared data and result locations are defined in
+Source code lives in the `backtest_overfitting` package under `src/`. Shared data and result locations are defined in
 `src/backtest_overfitting/paths.py`.
 After installation, import it in notebooks, for example:
 
@@ -77,9 +75,6 @@ Then run from the repository root:
 make reproduce
 ```
 
-This invokes `scripts/run_demo.sh`, which runs both scenarios and generates
-plots using the YAML settings. You can also run `./scripts/run_demo.sh` directly.
-
 Outputs for the example above:
 
 - `data/raw/demo_experiment/seed_42/`: original simulated price paths.
@@ -91,13 +86,3 @@ Outputs for the example above:
 Use a new experiment name for each run; existing outputs are protected.
 The number of blocks must be even, and the observation count must be divisible
 by it. For example, use 1,008 observations with 12 or 16 blocks.
-
-Older outputs in `result/` and the previous data layout are preserved but are
-not automatically migrated. The current runner and plotter use the layout above.
-
-Run the essential tests for simulation, trading, Sharpe scoring, CSCV,
-statistics, configuration, and the end-to-end pipeline:
-
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-```
