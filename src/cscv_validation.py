@@ -1,6 +1,6 @@
-import itertools   
 import numpy as np
 import pandas as pd
+from cscv import split_blocks, generate_combinations
 
 def create_time_blocks(strategy_matrix, S=8):
     """
@@ -21,24 +21,8 @@ def create_time_blocks(strategy_matrix, S=8):
         for each time block.
     """
 
-    # STEP 1: Check that S is a valid number
-    if S < 2 or S % 2 != 0:
-        raise ValueError("S must be an even integer >= 2.")
-
-    # STEP 2: Determine the number of observations
-    T = len(strategy_matrix)
-
-    # STEP 3: Require enough rows for S nonempty blocks
-    if T < S:
-        raise ValueError("S cannot exceed the number of observations.")
-
-    # STEP 4: Create consecutive row indices
-    row_indices = np.arange(T)
-
-    # STEP 5: Divide observations into S contiguous blocks
-    blocks = np.array_split(row_indices, S)
-
-    return blocks
+    row_indices = np.arange(len(strategy_matrix))[:, None]
+    return [block[:, 0] for block in split_blocks(row_indices, S)]
 
 
 ################################################################################################################################################
@@ -62,25 +46,10 @@ def generate_cscv_combinations(blocks):
     # STEP 1: Determine the number of blocks
     S = len(blocks)
 
-    # Half of the blocks will be in-sample
-    half = S // 2
-
-    # STEP 2: Generate all ways to select S/2 blocks
-    combinations = itertools.combinations(
-        range(S),
-        half
-    )
-
     # STEP 3: Store the IS/OOS splits
     splits = []
 
-    for is_blocks in combinations:
-
-        # OOS blocks are the complement of IS blocks
-        oos_blocks = [
-            i for i in range(S)
-            if i not in is_blocks
-        ]
+    for is_blocks, oos_blocks in generate_combinations(S):
 
         # Combine the row indices in chronological order
         is_indices = np.sort(
@@ -101,7 +70,7 @@ def generate_cscv_combinations(blocks):
 
 def calculate_column_sharpes(return_matrix):
     """
-    Calculate annualized Sharpe Ratios for all strategies.
+    Legacy finite daily-return Sharpe; not the masked P&L experiment scorer.
 
     Each column represents one strategy.
     """
@@ -138,11 +107,13 @@ def validate_effect_of_S(strategy_matrix, S_values=None):
     Examine how changing S affects CSCV partitioning
     and the number of possible IS/OOS combinations.
 
-    Does not calculate PBO.
+    Does not calculate PBO. The paper's binomial SE bound is reported as
+    a heuristic, not a calibrated standard error for dependent CSCV splits.
     """
 
     if S_values is None:
-        S_values = [4, 6, 8, 10, 12, 16, 20]
+        S_values = [s for s in [4, 6, 8, 10, 12, 16, 20]
+                    if s <= len(strategy_matrix) and len(strategy_matrix) % s == 0]
 
     # Number of observations in the return matrix
     T = len(strategy_matrix)
@@ -167,7 +138,10 @@ def validate_effect_of_S(strategy_matrix, S_values=None):
             "T": T,
             "min_block_size": min(block_sizes),
             "max_block_size": max(block_sizes),
-            "n_combinations": n_combinations
+            "n_combinations": n_combinations,
+            "is_observations": T // 2,
+            "oos_observations": T // 2,
+            "paper_binomial_se_upper_bound": np.sqrt(0.25 / n_combinations),
         })
 
     return pd.DataFrame(results)
@@ -181,14 +155,17 @@ def validate_effect_of_N(strategy_matrix, N_values=None):
     Examine how the number of strategies (N)
     affects the resolution of relative OOS ranks.
 
-    Does not calculate PBO.
+    Section 4's theoretical ranks assume no ties. This does not measure
+    observed ranks or PBO sensitivity to the chosen strategy universe.
     """
-
-    if N_values is None:
-        N_values = [10, 50, 100, 500, 1000, 8800]
 
     # Total available strategies
     total_strategies = strategy_matrix.shape[1]
+    if total_strategies < 2:
+        raise ValueError("At least two strategies are required.")
+    if N_values is None:
+        N_values = sorted({n for n in [10, 50, 100, 500, 1000, total_strategies]
+                           if 2 <= n <= total_strategies})
 
     # Store the results
     results = []
@@ -196,9 +173,9 @@ def validate_effect_of_N(strategy_matrix, N_values=None):
     for N in N_values:
 
         # Check that N is valid
-        if N < 2 or N > total_strategies:
+        if isinstance(N, (bool, np.bool_)) or not isinstance(N, (int, np.integer)) or N < 2 or N > total_strategies:
             raise ValueError(
-                f"N must be between 2 and {total_strategies}"
+                f"N must be an integer between 2 and {total_strategies}"
             )
 
         # Select N strategies from the return matrix
@@ -247,6 +224,7 @@ def validate_temporal_dependence(strategy_matrix, S=8):
 
     # STEP 2: Generate every IS/OOS combination
     splits = generate_cscv_combinations(blocks)
+    training_sets = {is_idx.tobytes() for is_idx, _ in splits}
 
     results = []
 
@@ -268,8 +246,7 @@ def validate_temporal_dependence(strategy_matrix, S=8):
 
         # Verify every original row is assigned
         complete_split = (
-            len(is_idx) + len(oos_idx)
-            == len(strategy_matrix)
+            np.array_equal(np.sort(np.r_[is_idx, oos_idx]), np.arange(len(strategy_matrix)))
         )
 
         results.append({
@@ -279,7 +256,9 @@ def validate_temporal_dependence(strategy_matrix, S=8):
             "is_boundary_gaps": int(is_gaps),
             "oos_boundary_gaps": int(oos_gaps),
             "no_overlap": no_overlap,
-            "complete_split": complete_split
+            "complete_split": complete_split,
+            "equal_sample_size": len(is_idx) == len(oos_idx),
+            "oos_reused_as_is": oos_idx.tobytes() in training_sets,
         })
 
     return pd.DataFrame(results)
@@ -295,10 +274,12 @@ def validate_autocorrelation_preservation(
     seed=42
 ):
     """
-    Compare lag-1 autocorrelation in an AR(1) series
-    under original ordering, CSCV, and random shuffling.
+    Custom AR(1) demonstration, not an experiment specified in the main PDF.
+    Measures only genuine adjacent pairs, not correlations across block gaps.
     """
 
+    if not np.isfinite(phi) or abs(phi) >= 1:
+        raise ValueError("Stationary AR(1) requires finite abs(phi) < 1.")
     # STEP 1: Generate reproducible random shocks
     rng = np.random.default_rng(seed)
     shocks = rng.normal(0, 1, T + 200)
@@ -327,8 +308,6 @@ def validate_autocorrelation_preservation(
     cscv_acfs = []
 
     for is_idx, _ in splits:
-        selected = series.iloc[is_idx].reset_index(drop=True)
-
         # Exclude artificial adjacent pairs across block gaps
         left_idx = is_idx[:-1]
         right_idx = is_idx[1:]
@@ -336,6 +315,8 @@ def validate_autocorrelation_preservation(
 
         x = series.iloc[left_idx[consecutive]].to_numpy()
         y = series.iloc[right_idx[consecutive]].to_numpy()
+        if len(x) < 2 or np.ptp(x) == 0 or np.ptp(y) == 0:
+            raise ValueError("Each IS split needs at least two nonconstant adjacent pairs for ACF.")
 
         cscv_acfs.append(np.corrcoef(x, y)[0, 1])
 
@@ -414,8 +395,7 @@ def validate_pbo_accuracy(estimated_pbo, reference_pbo):
 
 def validate_model_free(T=1000, N=100, S=8, seed=42):
     """
-    Test whether the CSCV sampling framework works
-    across different return distributions.
+    Custom sampling demonstration, not the paper's model-free validation.
 
     This tests input compatibility and sampling
     invariance, not PBO estimation accuracy.
@@ -487,185 +467,16 @@ def validate_model_free(T=1000, N=100, S=8, seed=42):
 ####################################################################################################################
 
 if __name__ == "__main__":
+    import argparse
 
-    # Load our previously saved strategy-return matrix
-    strategy_matrix = pd.read_parquet(
-        "results/strategy_returns_no_signal.parquet"
-    )
-
-    # Divide the data into eight time blocks
-    blocks = create_time_blocks(
-        strategy_matrix,
-        S=8
-    )
-
-    print("Number of blocks:", len(blocks))
-
-    for i, block in enumerate(blocks):
-        print(
-            f"Block {i + 1}: "
-            f"{len(block)} observations, "
-            f"rows {block[0]} to {block[-1]}"
-        )
-
-    # Ensure every observation is assigned exactly once
-    combined_indices = np.concatenate(blocks)
-
-    assert np.array_equal(
-        combined_indices,
-        np.arange(len(strategy_matrix))
-    )
-
-    print("All observations assigned correctly!")
-
-
-    # Generate all symmetric combinations
-    splits = generate_cscv_combinations(blocks)
-
-    print("\nTotal CSCV combinations:", len(splits))
-
-    # Inspect the first combination
-    is_indices, oos_indices = splits[0]
-
-    print("IS observations:", len(is_indices))
-    print("OOS observations:", len(oos_indices))
-
-    # Verify no observations overlap
-    assert len(np.intersect1d(is_indices, oos_indices)) == 0
-
-    # Verify each split includes all observations
-    assert len(is_indices) + len(oos_indices) == len(strategy_matrix)
-
-    # Verify the expected number of combinations
-    assert len(splits) == 70
-
-    print("CSCV combinations verified!")
-
-
-    # STEP 3: Test the first CSCV combination
-
-    # Extract row indices for the first split
-    is_indices, oos_indices = splits[0]
-
-    # Create the IS and OOS return matrices
-    is_matrix = strategy_matrix.iloc[is_indices]
-    oos_matrix = strategy_matrix.iloc[oos_indices]
-
-    # Calculate Sharpe Ratios for all strategies
-    is_sharpes = calculate_column_sharpes(is_matrix)
-    oos_sharpes = calculate_column_sharpes(oos_matrix)
-
-    # Find the strategy with the highest IS Sharpe Ratio
-    best_strategy = is_sharpes.idxmax()
-
-    # Get that strategy's IS and OOS performance
-    best_is_sharpe = is_sharpes.loc[best_strategy]
-    selected_oos_sharpe = oos_sharpes.loc[best_strategy]
-
-    print("\nFirst CSCV split:")
-    print("Best IS strategy:", best_strategy)
-    print("Best IS Sharpe:", round(best_is_sharpe, 4))
-    print("Same strategy OOS Sharpe:", round(selected_oos_sharpe, 4))
-
-
-    # VALIDATION 1: Effect of S
-    print("\n--- Effect of S ---")
-
-    s_results = validate_effect_of_S(
-        strategy_matrix
-    )
-
-    print(s_results.to_string(index=False))
-
-
-    # VALIDATION 2: Effect of N
-    print("\n--- Effect of N ---")
-
-    n_results = validate_effect_of_N(
-        strategy_matrix
-    )
-
-    print(n_results.to_string(index=False))
-
-
-    # VALIDATION 3: Temporal dependence
-    print("\n--- Temporal Dependence ---")
-
-    temporal_results = validate_temporal_dependence(
-        strategy_matrix,
-        S=8
-    )
-
-    print(temporal_results.head(10).to_string(index=False))
-
-    # Confirm all splits preserve chronological ordering
-    assert temporal_results["is_chronological"].all()
-    assert temporal_results["oos_chronological"].all()
-
-    # Confirm all splits are disjoint and complete
-    assert temporal_results["no_overlap"].all()
-    assert temporal_results["complete_split"].all()
-
-    print("\nAll 70 splits preserve chronological ordering!")
-    print(
-        "Average IS boundary gaps:",
-        temporal_results["is_boundary_gaps"].mean()
-    )
-
-
-    # VALIDATION 3B: Autocorrelation preservation
-    print("\n--- Autocorrelation Preservation ---")
-
-    autocorr_results = validate_autocorrelation_preservation(
-        T=1000,
-        S=8,
-        phi=0.7,
-        seed=42
-    )
-
-    print(autocorr_results.to_string(index=False))
-
-
-    # VALIDATION 4: PBO estimator accuracy
-    print("\n--- PBO Estimator Accuracy ---")
-
-    # Illustrative values, not empirical estimates
-    estimated_pbo = [0.42, 0.68, 0.15, 0.35]
-    reference_pbo = [0.45, 0.65, 0.20, 0.40]
-
-    accuracy_results = validate_pbo_accuracy(
-        estimated_pbo,
-        reference_pbo
-    )
-
-    print(accuracy_results)
-
-
-    # VALIDATION 5: Model-free and nonparametric sampling
-    print("\n--- Model-Free / Nonparametric Validation ---")
-
-    model_free_results = validate_model_free(
-        T=1000,
-        N=100,
-        S=8,
-        seed=42
-    )
-
-    print(model_free_results.to_string(index=False))
-
-    # Verify every distribution was processed successfully
-    assert model_free_results["no_overlap"].all()
-    assert model_free_results["complete_split"].all()
-
-    # Verify all cases generated 70 symmetric combinations
-    assert (model_free_results["n_splits"] == 70).all()
-
-    print("\nAll distribution tests passed!")
-
-
-
-
-
-
-
-
+    parser = argparse.ArgumentParser(description="Section 4 structural diagnostics, not PBO accuracy tests.")
+    parser.add_argument("returns", help="Path to a saved strategy-return Parquet matrix")
+    parser.add_argument("--S", type=int, default=8)
+    args = parser.parse_args()
+    matrix = pd.read_parquet(args.returns)
+    print("Effect of S (theoretical):")
+    print(validate_effect_of_S(matrix).to_string(index=False))
+    print("Effect of N (theoretical, no ties):")
+    print(validate_effect_of_N(matrix).to_string(index=False))
+    print("Chronology and symmetry:")
+    print(validate_temporal_dependence(matrix, S=args.S).to_string(index=False, max_rows=10))
