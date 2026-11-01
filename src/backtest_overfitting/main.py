@@ -152,6 +152,8 @@ def save_results(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     performance.to_parquet(output_dir / "performance.parquet", index=False)
+    if (output_dir / "performance.csv").exists():
+        performance.to_csv(output_dir / "performance.csv", index=False)
     if "eligibility" in cscv_results.attrs:
         cscv_results.attrs["eligibility"].to_parquet(output_dir / "eligibility.parquet", index=False)
     records = cscv_results.copy()
@@ -181,11 +183,6 @@ def main(experiment_name, n_times=1, real_data=False, base_seed=1, S=8, n_days=1
     split_blocks(np.empty((n_days, 1)), S)
     if isinstance(n_times, bool) or not isinstance(n_times, int) or n_times < 1:
         raise ValueError("n_times must be a positive integer.")
-    for seed in range(base_seed, base_seed + n_times):
-        if any(directory.exists() for directory in (
-                paths.data_dir(experiment_name, seed), paths.processed_dir(experiment_name, seed),
-                paths.result_dir(experiment_name, seed))):
-            raise FileExistsError("Use a new experiment name; existing seed outputs are preserved.")
     results = {}
     for seed in range(base_seed, base_seed + n_times):
         current_data = paths.data_dir(experiment_name, seed)

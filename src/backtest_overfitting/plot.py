@@ -114,7 +114,7 @@ def load_dataset(experiment, seed, name):
                 S=splits[0], is_pnl=is_pnl)
 
 
-# The paper uses Times for chart text and Helvetica for figure captions.
+# Keep consistent serif typography across saved plots.
 PAPER_STYLE = {
     "font.family": "serif", "font.serif": ["Times New Roman", "Times", "STIXGeneral"],
     "font.size": 10, "axes.titlesize": 12, "axes.labelsize": 10,
@@ -149,6 +149,7 @@ def plot_backtest(ax, data):
     ax.set_zorder(prices_ax.get_zorder() + 1)
     ax.patch.set_visible(False)
     ax.set_ylabel("Cumulative P&L (price units)" if is_pnl else "Performance (%)")
+    ax.set_title("Backtested performance")
     ax.xaxis.set_major_locator(mdates.MonthLocator(bymonth=[3, 9]))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
     ax.tick_params(axis="x", labelrotation=90, pad=-8)
@@ -191,7 +192,7 @@ def plot_degradation(ax, data):
     ax.text(.04, .94, regression, transform=ax.transAxes, va="top", fontsize=9, bbox=BOX)
     ax.text(.04, .04, f"Prob[SR OOS<0]={(y < 0).mean():.2f}",
             transform=ax.transAxes, va="bottom", bbox=BOX)
-    ax.set(xlabel="SR IS", ylabel="SR OOS", title=f"{data['S']} | OOS Perf. Degradation")
+    ax.set(xlabel="SR IS", ylabel="SR OOS", title="OOS performance degradation")
     ax.margins(x=.06, y=.18)
 
 
@@ -213,7 +214,7 @@ def plot_logits(ax, data):
         peak = max(peak, density.max())
     ax.text(.04, .94, f"Prob Overfit={data['summary']['pbo']:.2f}",
             transform=ax.transAxes, va="top", bbox=BOX)
-    ax.set(xlabel="Logits", ylabel="Frequency", title=f"{data['S']} | Hist. of Rank Logits",
+    ax.set(xlabel="Logits", ylabel="Frequency", title="Rank logits",
            xlim=(-extent, extent), ylim=(0, peak * 1.12))
     ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
 
@@ -233,22 +234,11 @@ def plot_dominance(ax, data):
     ax.patch.set_visible(False)
     area_ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
     ax.set(xlabel="SR optimized vs. non-optimized", ylabel="Frequency",
-           title=f"{data['S']} | OOS Cumul. Dist.", ylim=(0, 1))
+           title="OOS cumulative distribution", ylim=(0, 1))
     ax.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
     for axis, position in [(ax, "center left"), (area_ax, "center right")]:
         axis.legend(loc=position).get_frame().set_linewidth(.45)
     return area_ax
-
-
-def paper_frame(fig, number, caption):
-    from matplotlib.lines import Line2D
-    import textwrap
-
-    fig.text(.045, .955, f"FIGURE {number}", family="sans-serif", fontsize=9, weight="bold", va="top")
-    fig.text(.175, .955, textwrap.fill(caption, width=80), family="sans-serif", fontsize=9, va="top")
-    for y in (.865, .035):
-        fig.add_artist(Line2D([.045, .955], [y, y], transform=fig.transFigure,
-                              color="black", linewidth=1.25))
 
 
 def main():
@@ -278,25 +268,16 @@ def plot_experiment(experiment, seed):
     plots = [("backtest", plot_backtest), ("degradation", plot_degradation),
              ("logits", plot_logits), ("dominance", plot_dominance)]
     with plt.rc_context(PAPER_STYLE):
-        # Individual exports reproduce the paper's figure layout and caption rules.
-        for example, (label, data) in enumerate(zip(["no_signal", "seasonal"], datasets), 1):
-            for offset, (name, draw) in enumerate(plots):
-                number = 6 + (example - 1) * 4 + offset
-                fig = plt.figure(figsize=(7, 5.6))
-                ax = fig.add_axes([.19, .18, .62, .56])
+        for label, data in zip(["no_signal", "seasonal"], datasets):
+            scenario = "No signal" if label == "no_signal" else "Seasonal signal"
+            for name, draw in plots:
+                fig, ax = plt.subplots(figsize=(7, 5))
                 draw(ax, data)
-                if name == "backtest":
-                    caption = f"Backtested performance of a seasonal strategy (example {example})."
-                else:
-                    ending = {"degradation": "performance degradation" if example == 1 else "monthly effect",
-                              "logits": "logit distribution",
-                              "dominance": "stochastic dominance"}[name]
-                    caption = (f"CSCV analysis of the backtest of a seasonal strategy (example {example}): "
-                               f"{ending}.")
-                paper_frame(fig, number, caption)
+                ax.set_title(f"{scenario}: {ax.get_title()}")
+                fig.tight_layout()
                 fig.savefig(output / f"{label}_{name}.png", dpi=250)
                 plt.close(fig)
-        # Retain the convenient overview, using the same four paper-style panels.
+        # Retain the overview using the same four panels.
         fig, axes = plt.subplots(4, 2, figsize=(14, 17))
         fig.subplots_adjust(left=.08, right=.91, bottom=.055, top=.94, hspace=.45, wspace=.5)
         for col, data in enumerate(datasets):

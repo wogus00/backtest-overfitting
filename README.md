@@ -83,6 +83,5 @@ Outputs for the example above:
 - `results/replication/demo_experiment/seed_42/figures/comparison.pdf`: visual overview.
 - `results/replication/demo_experiment/seed_42/experiment.json`: settings and simulation conventions.
 
-Use a new experiment name for each run; existing outputs are protected.
 The number of blocks must be even, and the observation count must be divisible
 by it. For example, use 1,008 observations with 12 or 16 blocks.
