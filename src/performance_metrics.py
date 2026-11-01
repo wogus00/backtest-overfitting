@@ -3,6 +3,95 @@ import pandas as pd
 
 from scipy.stats import skew, kurtosis, norm
 
+
+def calendar_day_weights(dates):
+    """Allocate intervening days to the preceding row; the final row gets one.
+
+    Weights partition the inclusive experiment duration, including weekends.
+    Summing selected rows excludes calendar exposure owned by omitted blocks.
+    """
+    if not isinstance(dates, pd.DatetimeIndex):
+        raise TypeError("Expected a DatetimeIndex.")
+    if (len(dates) == 0 or dates.hasnans or not dates.is_unique
+            or not dates.is_monotonic_increasing):
+        raise ValueError("Expected nonempty, unique, increasing dates.")
+    days = dates.to_numpy(dtype="datetime64[D]")
+    weights = np.r_[np.diff(days).astype(float), 1.]
+    if np.any(weights <= 0):
+        raise ValueError("Expected at most one observation per calendar day.")
+    return weights
+
+
+def column_pnl_sharpe_ratios(pnl, calendar_days):
+    """Population Sharpe on recorded P&L, annualized by represented duration."""
+    values = np.asfortranarray(pnl, dtype=float)
+    if values.ndim != 2 or np.isinf(values).any():
+        raise ValueError("Expected a 2D P&L matrix containing finite values or NaN.")
+    if not np.isfinite(calendar_days) or calendar_days <= 0:
+        raise ValueError("calendar_days must be finite and positive.")
+    count = np.sum(~np.isnan(values), axis=0)
+    mean = np.divide(np.nansum(values, axis=0), count,
+                     out=np.zeros(values.shape[1]), where=count > 0)
+    variance = np.divide(np.nansum((values - mean)**2, axis=0), count,
+                         out=np.zeros(values.shape[1]), where=count > 0)
+    scores = np.divide(mean, np.sqrt(variance),
+                       out=np.full(values.shape[1], np.nan),
+                       where=(count > 2) & (variance > 0))
+    return scores * np.sqrt(count * 365.25 / calendar_days)
+
+
+def pnl_sharpe_ratio(pnl, start_date, end_date):
+    start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    if pd.isna(start) or pd.isna(end) or end < start:
+        raise ValueError("Expected valid experiment dates with start <= end.")
+    observations = pd.Series(pnl, dtype=float).dropna().to_numpy()
+    if not np.isfinite(observations).all():
+        raise ValueError("Recorded P&L must be finite; only NaN denotes inactivity.")
+    # The reference evaluates only strategies with more than two observations.
+    if len(observations) <= 2:
+        return np.nan
+    volatility = observations.std(ddof=0)
+    if volatility == 0:
+        return np.nan
+    frequency = len(observations) * 365.25 / ((end - start).days + 1)
+    return float(observations.mean() / volatility * np.sqrt(frequency))
+
+
+def evaluate_pnl_strategies(strategy_matrix):
+    """Full-sample Sharpe for date-aligned price-unit P&L (NaN = unrecorded)."""
+    if not isinstance(strategy_matrix, pd.DataFrame):
+        raise TypeError("strategy_matrix must be a Pandas DataFrame.")
+    dates = strategy_matrix.index
+    if not isinstance(dates, pd.DatetimeIndex):
+        raise TypeError("P&L must have a DatetimeIndex for calendar annualization.")
+    if (len(dates) == 0 or dates.hasnans or not dates.is_unique
+            or not dates.is_monotonic_increasing):
+        raise ValueError("P&L must have nonempty, unique, increasing dates.")
+    if strategy_matrix.columns.hasnans or not strategy_matrix.columns.is_unique:
+        raise ValueError("Strategy IDs must be nonmissing and unique.")
+    return pd.DataFrame([
+        {"strategy_id": strategy_id,
+         "sharpe": pnl_sharpe_ratio(strategy_matrix[strategy_id], dates[0], dates[-1])}
+        for strategy_id in strategy_matrix.columns
+    ], columns=["strategy_id", "sharpe"])
+
+
+def column_sharpe_ratios(returns):
+    """Annualized Sharpe per column of a finite T x N return matrix."""
+    # Contiguous columns preserve the scalar scorer's summation order and ties.
+    returns = np.asfortranarray(returns, dtype=float)
+    if returns.ndim != 2 or not np.isfinite(returns).all():
+        raise ValueError("Expected a finite T x N return matrix.")
+    if len(returns) < 2:
+        return np.full(returns.shape[1], np.nan)
+    volatility = returns.std(axis=0, ddof=1)
+    scores = np.divide(
+        returns.mean(axis=0), volatility,
+        out=np.full(returns.shape[1], np.nan), where=volatility > 0,
+    )
+    return scores * np.sqrt(252)
+
+
 def sharpe_ratio(returns, risk_free_rate=0.0, annualize=True):
     """
     Calculate the Sharpe Ratio of a trading strategy.
