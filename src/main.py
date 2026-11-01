@@ -1,28 +1,26 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from synthetic_data import random_walk, random_walk_seasonal
-from strategies import generate_strategy_configurations, generate_strategy_returns, generate_strategy_returns_old
-from performance_metrics import sharpe_ratio, sortino_ratio, evaluate_strategies, maximum_drawdown, probabilistic_sharpe_ratio
-from cscv import cscv
+from synthetic_data import random_walk, random_walk_seasonal, simulation_dates
+from strategies import generate_strategy_configurations, generate_strategy_returns
+from performance_metrics import sharpe_ratio, column_sharpe_ratios, evaluate_pnl_strategies, calendar_day_weights
+from cscv import cscv, split_blocks
 from overfit_statistics import performance_degradation, stochastic_dominance, compute_pbo, probability_of_loss
 from cscv_validation import (validate_effect_of_S, 
                              validate_effect_of_N, 
                              validate_temporal_dependence, 
-                             validate_autocorrelation_preservation, 
-                             validate_pbo_accuracy, 
-                             validate_model_free)
-import time
+                             validate_pbo_accuracy)
 
 
 
-def get_prices(prices_dir, seed=42):
-    prices_no_signal = random_walk(n_days=1000, sigma=0.01, seed=seed)
-    prices_seasonal = random_walk_seasonal(n_days=1000, sigma=0.01, seed=seed)
+def get_prices(prices_dir, seed=42, n_days=1000):
+    dates = simulation_dates(n_days)
+    prices_no_signal = random_walk(n_days=n_days, sigma=1.0, seed=seed)
+    prices_seasonal = random_walk_seasonal(n_days=n_days, sigma=1.0, seed=seed)
     prices_dir.mkdir(parents=True, exist_ok=True)
 
-    pd.DataFrame({"price": prices_no_signal}).to_parquet(prices_dir / "no_signal.parquet", index=False)
-    pd.DataFrame({"price": prices_seasonal}).to_parquet(prices_dir / "seasonal.parquet", index=False)
+    pd.DataFrame({"date": dates, "price": prices_no_signal}).to_parquet(prices_dir / "no_signal.parquet", index=False)
+    pd.DataFrame({"date": dates, "price": prices_seasonal}).to_parquet(prices_dir / "seasonal.parquet", index=False)
 
     return prices_no_signal, prices_seasonal
 
@@ -32,15 +30,14 @@ def get_strategies(directory, price_dir):
 
     returns_dir = directory / "returns"
 
-    configurations = generate_strategy_configurations()
-
-    prices_no_signal = pd.read_parquet(price_dir / "no_signal.parquet")["price"].to_numpy()
-    prices_seasonal = pd.read_parquet(price_dir / "seasonal.parquet")["price"].to_numpy()
-
-
-    dates = pd.bdate_range(start="2020-01-01", periods=len(prices_no_signal))
-    prices_no_signal = pd.Series(prices_no_signal, index=dates, name="price")
-    prices_seasonal = pd.Series(prices_seasonal, index=dates, name="price")
+    ordinary = pd.read_parquet(price_dir / "no_signal.parquet")
+    seasonal = pd.read_parquet(price_dir / "seasonal.parquet")
+    dates = pd.DatetimeIndex(ordinary["date"])
+    if not dates.equals(pd.DatetimeIndex(seasonal["date"])):
+        raise ValueError("Scenario dates must align.")
+    configurations = generate_strategy_configurations(dates)
+    prices_no_signal = pd.Series(ordinary["price"].to_numpy(), index=dates, name="price")
+    prices_seasonal = pd.Series(seasonal["price"].to_numpy(), index=dates, name="price")
 
     returns_no_signal = generate_strategy_returns(prices_no_signal, configurations)
     returns_seasonal = generate_strategy_returns(prices_seasonal, configurations)
@@ -55,7 +52,7 @@ def get_strategies(directory, price_dir):
 
 
 def measure_performance(returns, configurations):
-    performance = evaluate_strategies(returns)
+    performance = evaluate_pnl_strategies(returns)
 
     return performance.merge(configurations,on="strategy_id",how="left",validate="one_to_one")
 
@@ -63,34 +60,46 @@ def measure_performance(returns, configurations):
 
 def score_columns(matrix, metric=sharpe_ratio):
     matrix = np.asarray(matrix, dtype=float)
+    if metric is sharpe_ratio:
+        return column_sharpe_ratios(matrix)
 
     scores = np.array([metric(matrix[:, column]) for column in range(matrix.shape[1])])
 
     return scores
 
-def run_cscv(returns, S=8, metric=sharpe_ratio):
-    results = cscv(returns.to_numpy(),
-                   S=S,
-                   metric=lambda matrix: score_columns(matrix, metric=metric))
+def run_cscv(returns, S=8, metric=None):
+    if metric is None:
+        results = cscv(returns.to_numpy(), S=S,
+                       calendar_days=calendar_day_weights(returns.index))
+        eligibility = results.attrs["eligibility"]
+        eligibility["strategy_id"] = returns.columns.to_numpy()[eligibility.column_index]
+    else:
+        # Explicit custom metrics retain the original finite-return interface.
+        results = cscv(returns.to_numpy(), S=S,
+                       metric=lambda matrix: score_columns(matrix, metric=metric))
 
     results["strategy_id"] = returns.columns.to_numpy()[results["selected_idx"].to_numpy()]
 
     return results
 
 def compute_statistics(cscv_results, metric_name, benchmark=None):
+    pbo = compute_pbo(cscv_results)
     degradation = performance_degradation(cscv_results)
     dominance = stochastic_dominance(cscv_results)
 
     summary = {"metric": metric_name,
-               "pbo": compute_pbo(cscv_results),
+               "pbo": pbo,
                "degradation_slope": degradation["slope"],
                "degradation_intercept": degradation["intercept"],
                "degradation_r2": degradation["R^2"],
-               "probability_of_compounded_loss": probability_of_loss(cscv_results),
+               "degradation_defined": degradation["defined"],
+               "probability_of_loss": probability_of_loss(cscv_results),
                "first_order_dominance_vs_split_mean": dominance["first_order_dominance"],
                "second_order_dominance_vs_split_mean": dominance["second_order_dominance"]}
 
     if benchmark is not None:
+        if not np.isfinite(benchmark):
+            raise ValueError("OOS score benchmark must be finite.")
         summary["oos_score_benchmark"] = benchmark
         summary["probability_below_oos_benchmark"] = (cscv_results["performance_oos"] < benchmark).mean()
 
@@ -104,6 +113,7 @@ def run_validation(
     estimated_pbo=None,
     reference_pbo=None,
 ):
+    """Section 4 structural diagnostics; optional errors need external references."""
     if (estimated_pbo is None) != (reference_pbo is None):
         raise ValueError(
             "Provide both estimated_pbo and reference_pbo, or neither."
@@ -118,12 +128,6 @@ def run_validation(
         ),
         "temporal_dependence": validate_temporal_dependence(
             returns, S=S
-        ),
-        "autocorrelation": validate_autocorrelation_preservation(
-            T=len(returns), S=S
-        ),
-        "model_free": validate_model_free(
-            T=len(returns), S=S
         ),
     }
 
@@ -147,7 +151,11 @@ def save_results(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     performance.to_parquet(output_dir / "performance.parquet", index=False)
-    cscv_results.to_parquet(output_dir / "cscv.parquet", index=False)
+    if "eligibility" in cscv_results.attrs:
+        cscv_results.attrs["eligibility"].to_parquet(output_dir / "eligibility.parquet", index=False)
+    records = cscv_results.copy()
+    records.attrs = {}
+    records.to_parquet(output_dir / "cscv.parquet", index=False)
     pd.DataFrame([summary]).to_csv(output_dir / "summary.csv", index=False)
 
     pd.DataFrame({"score": dominance["x"], 
@@ -163,117 +171,70 @@ def save_results(
     return output_dir
 
 
-def main(experiment_name, n_times=5, real_data=False, base_seed=42, S=8):
-    metrics = {
-        "sharpe": sharpe_ratio,
-        # "sortino": sortino_ratio,
-        # "max_drawdown": maximum_drawdown,
-        # "probabilistic_sharpe": probabilistic_sharpe_ratio
-    }
+def main(experiment_name, n_times=1, real_data=False, base_seed=1, S=8, n_days=1000):
+    import json
 
-    print(f"Experiment: {experiment_name}")
-    DATA_DIR = Path(f"data/{experiment_name}")
-    RESULT_DIR = Path(f"result/{experiment_name}")
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    RESULT_DIR.mkdir(parents=True, exist_ok=True)
-
+    if real_data:
+        raise NotImplementedError("This runner implements the synthetic P&L experiment.")
+    simulation_dates(n_days)
+    split_blocks(np.empty((n_days, 1)), S)
+    if isinstance(n_times, bool) or not isinstance(n_times, int) or n_times < 1:
+        raise ValueError("n_times must be a positive integer.")
+    data_dir = Path("data") / experiment_name
+    result_dir = Path("result") / experiment_name
+    for seed in range(base_seed, base_seed + n_times):
+        if (data_dir / f"seed_{seed}").exists() or (result_dir / f"seed_{seed}").exists():
+            raise FileExistsError("Use a new experiment name; existing seed outputs are preserved.")
     results = {}
-    if not real_data:
-        for i in range(n_times):
-
-            seed = base_seed + i
-            curr_data_dir = DATA_DIR / f"seed_{seed}"
-            curr_results_dir = RESULT_DIR / f"seed_{seed}"
-
-            print(f"Running simulation {i+1}/{n_times}, seed={seed}")
-
-            # 1. Generate synthetic prices using the current seed
-            start_time = time.time()
-            get_prices(curr_data_dir, seed=seed)
-            end_time = time.time()
-            print(f"Price generation took {end_time - start_time:.2f} seconds.")
-
-            # 2. Generate strategy returns for both datasets
-            start_time = time.time()
-            configurations, returns_no_signal, returns_seasonal = get_strategies(curr_results_dir, curr_data_dir)
-            end_time = time.time()
-            print(f"Strategy generation took {end_time - start_time:.2f} seconds.")
-            datasets = {"no_signal": returns_no_signal,"seasonal": returns_seasonal}
-
-
-            # for each dataset, compute performance metrics, run CSCV, and save results
-            for dataset_name, returns in datasets.items():
-                # compute performance metrics
-                start_time = time.time()
-                performance = measure_performance(returns, configurations)   
-                end_time = time.time()
-                print(f"Performance measurement for {dataset_name} took {end_time - start_time:.2f} seconds.")
-                start_time = time.time()
-                validation = run_validation(
-                    returns,
-                    S_values=[
-                        s for s in [4, 8, 16]
-                        if s <= len(returns) and len(returns) % s == 0],
-                    N_values=sorted({
-                        n for n in [10, 50, 100, 500, 1000, returns.shape[1]]
-                        if 2 <= n <= returns.shape[1]}),
-                    S=S)
-                end_time = time.time()
-                print(f"Validation checks for {dataset_name} took {end_time - start_time:.2f} seconds.")
-
-                # run for each performance metric
-                for performance_metric, metric_func in metrics.items():
-
-                    # run CSCV and compute statistics for each performance metric
-                    start_time = time.time()
-                    cscv_results = run_cscv(
-                        returns,
-                        S=S,
-                        metric=metric_func)
-                    end_time = time.time()
-                    print(f"CSCV for {dataset_name} with metric {performance_metric} took {end_time - start_time:.2f} seconds.")
-
-                    start_time = time.time()
-                    summary, dominance = compute_statistics(cscv_results, metric_name=performance_metric, benchmark=0.0)
-                    end_time = time.time()
-                    print(f"Statistics computation for {dataset_name} with metric {performance_metric} took {end_time - start_time:.2f} seconds.")
-                    output_directory = curr_results_dir
-                    output_dir = save_results(
-                        output_directory,
-                        dataset_name=dataset_name,
-                        performance=performance,
-                        cscv_results=cscv_results,
-                        summary=summary,
-                        dominance=dominance,
-                        validation=validation,
-                    )
-
-                    results[(seed, dataset_name, performance_metric)] = summary
-                    print(f"Saved to {output_dir}")
-                
-    
-    else:
-        # handle real data case
-        pass # for now
+    for seed in range(base_seed, base_seed + n_times):
+        current_data = data_dir / f"seed_{seed}"
+        current_results = result_dir / f"seed_{seed}"
+        print(f"Experiment: {experiment_name}; seed={seed}; T={n_days}; S={S}")
+        get_prices(current_data, seed=seed, n_days=n_days)
+        configurations, ordinary, seasonal = get_strategies(current_results, current_data)
+        metadata = dict(seed=seed, S=S, T=n_days, sigma=1., units="price_unit_pnl",
+                        source="https://www.quantresearch.org/CSCV_3.py.txt",
+                        calendar="Monday-Thursday from 2000-01-01 (literal source)",
+                        rng="random.Random(seed).gauss; paired shocks across scenarios",
+                        seasonality="source numBusinessDays <= 5; shift 0.25 sigma",
+                        annualization="365.25; each row owns days until the next row; last row owns one day",
+                        eligibility="fixed universe with >2 records and positive variance in every half-split",
+                        dominance_benchmark="mean OOS Sharpe across eligible strategies per split",
+                        reproduction="source-style simulation; original figure seed and CSCV conventions unverified")
+        (current_results / "experiment.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        for name, pnl in (("no_signal", ordinary), ("seasonal", seasonal)):
+            cscv_results = run_cscv(pnl, S=S)
+            eligibility = cscv_results.attrs["eligibility"]
+            ids = eligibility.loc[eligibility.eligible, "strategy_id"].tolist()
+            eligible_pnl = pnl[ids]
+            performance = measure_performance(eligible_pnl, configurations)
+            validation = run_validation(
+                eligible_pnl,
+                S_values=[s for s in sorted({4, 8, 16, S}) if len(pnl) % s == 0],
+                N_values=sorted({n for n in [10, 50, 100, 500, 1000, len(ids)] if n <= len(ids)}),
+                S=S)
+            summary, dominance = compute_statistics(cscv_results, "sharpe", benchmark=0.)
+            summary.update(S=S, T=len(pnl), n_strategies=len(ids),
+                           n_excluded_strategies=len(pnl.columns) - len(ids), units="price_unit_pnl")
+            output = save_results(current_results, name, performance, cscv_results,
+                                  summary, dominance, validation)
+            results[(seed, name)] = summary
+            print(f"Saved {output}: PBO={summary['pbo']:.2%}, loss={summary['probability_of_loss']:.2%}")
+    return results
 
 
-    print("\nAll simulations completed.")
-    print("Final results:")
+def cli():
+    import argparse
 
-    for (seed, dataset_name, metric_name), result in results.items():
-        print(f"\nSeed: {seed}, Dataset: {dataset_name}, Metric: {metric_name}")
-        print(pd.Series(result).to_string())
-
-
-    
+    parser = argparse.ArgumentParser(description="Run the source-style seasonal P&L experiment.")
+    parser.add_argument("--experiment", default="paper_source_S8")
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--n-times", type=int, default=1)
+    parser.add_argument("--S", type=int, default=8)
+    parser.add_argument("--n-days", type=int, default=1000)
+    args = parser.parse_args()
+    main(args.experiment, n_times=args.n_times, base_seed=args.seed, S=args.S, n_days=args.n_days)
 
 
 if __name__ == "__main__":
-
-    main(
-        experiment_name="test_experiment",
-        n_times=1,
-        real_data=False,
-        base_seed=45,
-        S=8
-    )
+    cli()
