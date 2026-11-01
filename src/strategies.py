@@ -1,355 +1,149 @@
-
 import itertools
 import numpy as np
 import pandas as pd
 
 
-# 1. GENERATE STRATEGY CONFIGURATIONS
+def _validate_prices(prices):
+    if not isinstance(prices, pd.Series):
+        raise TypeError("prices must be a Pandas Series.")
+    if not isinstance(prices.index, pd.DatetimeIndex):
+        raise TypeError("prices must have a DatetimeIndex.")
+    if (prices.empty or prices.index.hasnans or not prices.index.is_unique
+            or not prices.index.is_monotonic_increasing):
+        raise ValueError("prices must have nonempty, unique, increasing dates.")
+    values = prices.to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError("prices must be finite.")
+    return values
 
 
-def generate_strategy_configurations():
+def _entry_positions(dates):
+    months = dates.to_period("M")
+    ordinals = pd.Series(1, index=dates).groupby(months).cumsum().to_numpy()
+    first = dates[0].normalize().replace(day=1)
+    interior = pd.date_range(first + pd.Timedelta(days=1),
+                             dates[0].normalize() - pd.Timedelta(days=1))
+    # Preserve getRefDates_MonthBusinessDate's extra first-month offset.
+    ordinals[months == months[0]] += 1 + np.count_nonzero(interior.dayofweek < 5)
+    return {day: np.flatnonzero(ordinals == day) for day in range(1, 30)}
+
+
+def generate_strategy_configurations(dates=None):
+    """Candidate grid; optional dates exclude entry ordinals never observed.
+
+    holding_period is 0..20; stop_loss is a signed sigma multiple (-10..0).
+    Without dates, all source entry ordinals 1..29 are candidates. The P&L
+    generator subsequently omits candidates with two or fewer observations.
     """
-    Generate 8,800 seasonal trading strategy configurations.
-
-    Parameters:
-        entry_day      - Trading day of the month to enter
-        holding_period - Maximum number of trading days to hold
-        stop_loss      - Volatility-based stop-loss multiplier
-        side           - +1 for long, -1 for short
-
-    Returns:
-        DataFrame containing all strategy configurations.
-    """
-
-    # Define the parameter ranges
-    entry_days = range(1, 23)
-    holding_periods = range(1, 21)
-    stop_losses = range(0, 10)
-    sides = [-1, 1]
-
-    # Generate every possible parameter combination
-    combinations = itertools.product(
-        entry_days,
-        holding_periods,
-        stop_losses,
-        sides
-    )
-
-    # Store each configuration as one row
+    entry_days = range(1, 30)
+    if dates is not None:
+        _validate_prices(pd.Series(0., index=dates))
+        entry_days = [day for day, positions in _entry_positions(dates).items()
+                      if len(positions)]
     configurations = pd.DataFrame(
-        combinations,
-        columns=[
-            "entry_day",
-            "holding_period",
-            "stop_loss",
-            "side"
-        ]
+        itertools.product(entry_days, range(21), range(-10, 1), [-1, 1]),
+        columns=["entry_day", "holding_period", "stop_loss", "side"],
     )
-
-    # Assign a unique strategy ID for merging results
-    configurations.insert(
-        0,
-        "strategy_id",
-        np.arange(len(configurations))
-    )
-
+    configurations.insert(0, "strategy_id", np.arange(len(configurations)))
     return configurations
 
-# 2. EXECUTE ONE SEASONAL TRADING STRATEGY
+
+def _validate_rule(entry_day, holding_period, stop_loss, side, sigma):
+    for name, value, lower, upper in (
+        ("entry_day", entry_day, 1, 29),
+        ("holding_period", holding_period, 0, 20),
+    ):
+        if (isinstance(value, (bool, np.bool_)) or not np.isfinite(value)
+                or value != int(value) or not lower <= value <= upper):
+            raise ValueError(f"{name} must be an integer in [{lower}, {upper}].")
+    if not np.isfinite(stop_loss) or stop_loss > 0:
+        raise ValueError("stop_loss must be a finite, nonpositive sigma multiple.")
+    if isinstance(side, (bool, np.bool_)) or side not in (-1, 1):
+        raise ValueError("side must be -1 or 1.")
+    if not np.isfinite(sigma) or sigma <= 0:
+        raise ValueError("sigma must be finite and positive.")
 
 
-def run_seasonal_strategy(
-    prices,
-    entry_day,
-    holding_period,
-    stop_loss,
-    side
-):
-    """
-    Simulate one monthly seasonal trading strategy.
-
-    Enter a long or short position on the chosen trading day
-    of each month and hold for at most holding_period returns,
-    exiting earlier if the stop-loss threshold is reached.
-
-    Assumptions:
-        - Trades enter at the closing price of entry_day.
-        - Stop-loss distance uses the previous 20 daily returns.
-        - Stop-loss multiplier is fixed when entering the trade.
-        - Trades are executed at observed closing prices.
-        - No transaction costs or slippage.
-        - Only one position can be open at a time.
-
-    Returns:
-        A Pandas Series of daily strategy returns.
-    """
-
-    # Ensure prices are a numeric Pandas Series
-    prices = pd.Series(prices, copy=True).astype(float)
-
-    # Calculate the underlying asset's daily returns
-    asset_returns = prices.pct_change().fillna(0.0)
-
-    # Use only past returns to calculate volatility
-    volatility = asset_returns.rolling(20).std().shift(1)
-
-    # Start with zero returns when not invested
-    strategy_returns = pd.Series(
-        0.0,
-        index=prices.index,
-        dtype=float
-    )
-
-    # Trading-day number within each calendar month
-    trading_days = (
-        pd.Series(1, index=prices.index)
-        .groupby(prices.index.to_period("M"))
-        .cumsum()
-    )
-
-    # Prevent trades from overlapping
-    last_exit = -1
-
-    # Examine each month separately
-    for month in prices.index.to_period("M").unique():
-
-        # Find the row positions belonging to this month
-        month_indices = np.flatnonzero(
-            prices.index.to_period("M") == month
-        )
-
-        # Skip months that don't have the requested entry day
-        if entry_day > len(month_indices):
+def _trade_pnl(values, entries, holding_period, stop_threshold, side):
+    observations = np.full(len(values), np.nan)
+    if not len(entries):
+        return observations
+    reference = 0
+    age = None
+    accumulated = 0.
+    previous_position = 0
+    for i in range(1, len(values)):
+        if i >= entries[reference]:
+            if i - 1 < entries[reference]:
+                age, accumulated = 0, 0.
+            if reference < len(entries) - 1:
+                while i > entries[reference]:
+                    reference += 1
+        if age is None:
             continue
-
-        # Identify the entry position
-        entry_idx = month_indices[entry_day - 1]
-
-        # Skip if an earlier trade is still active
-        if entry_idx <= last_exit:
-            continue
-
-        # Need historical observations to estimate volatility
-        if pd.isna(volatility.iloc[entry_idx]):
-            continue
-
-        entry_price = prices.iloc[entry_idx]
-
-        # Fix the stop-loss threshold at the entry date
-        stop_threshold = (
-            float(stop_loss) * volatility.iloc[entry_idx]
-        )
-
-        # Limit the trade to the requested holding period
-        exit_limit = min(
-            entry_idx + int(holding_period),
-            len(prices) - 1
-        )
-
-        # Examine subsequent daily closes
-        for i in range(entry_idx + 1, exit_limit + 1):
-
-            # Daily return earned in the position
-            daily_strategy_return = (
-                int(side) * asset_returns.iloc[i]
-            )
-
-            strategy_returns.iloc[i] = daily_strategy_return
-
-            # Approximate cumulative directional price return
-            cumulative_trade_return = (
-                int(side) *
-                (prices.iloc[i] / entry_price - 1)
-            )
-
-            # Stop trading when the loss threshold is reached
-            if cumulative_trade_return <= -stop_threshold:
-                last_exit = i
-                break
-
-        else:
-            # The position reached its maximum holding period
-            last_exit = exit_limit
-
-    return strategy_returns
+        # The source decides today's position before adding today's earned P&L.
+        position = side if age < holding_period and accumulated > stop_threshold else 0
+        if position != 0 or previous_position != 0:
+            observations[i] = previous_position * (values[i] - values[i - 1])
+            accumulated += observations[i]
+            previous_position = position
+        age += 1
+    return observations
 
 
-# 3. GENERATE RETURNS FOR ALL STRATEGIES
+def run_seasonal_strategy(prices, entry_day, holding_period, stop_loss, side, sigma=1.0):
+    """Date-aligned price-unit P&L, with NaN for unrecorded observations.
 
-
-def generate_strategy_returns_old(prices, configurations):
+    Stop thresholds use the known simulation sigma. Entry zeros, exit-day P&L,
+    monthly resets and the reference's first-month numbering are preserved.
     """
-    Run all seasonal configurations on one price series.
+    values = _validate_prices(prices)
+    _validate_rule(entry_day, holding_period, stop_loss, side, sigma)
+    observations = _trade_pnl(values, _entry_positions(prices.index)[entry_day],
+                              holding_period, stop_loss * sigma, side)
+    return pd.Series(observations, index=prices.index, name="pnl")
 
-    Parameters:
-        prices:
-            Pandas Series indexed by business dates.
 
-        configurations:
-            DataFrame returned by generate_strategy_configurations().
+def generate_strategy_returns(prices, configurations, sigma=1.0):
+    """Date-aligned P&L for candidates with more than two recorded observations.
 
-    Returns:
-        T x N DataFrame of daily strategy returns,
-        with strategy_id values as column labels.
+    All input dates are retained for future CSCV alignment; use notna() as the
+    observation mask. Unlike the old implementation, inactive days are not zero.
     """
-
-    # Verify the input price series has a DatetimeIndex
-    if not isinstance(prices, pd.Series):
-        raise TypeError("prices must be a Pandas Series.")
-
-    if not isinstance(prices.index, pd.DatetimeIndex):
-        raise TypeError("prices must have a DatetimeIndex.")
-
-    # Store the daily return Series for every strategy
-    all_returns = {}
-
-    # Iterate over the configuration table
-    for _, strategy in configurations.iterrows():
-
-        # Extract this strategy's unique identifier
-        strategy_id = int(strategy["strategy_id"])
-
-        # Run the strategy with its own parameters
-        returns = run_seasonal_strategy(
-            prices=prices,
-            entry_day=int(strategy["entry_day"]),
-            holding_period=int(strategy["holding_period"]),
-            stop_loss=float(strategy["stop_loss"]),
-            side=int(strategy["side"])
-        )
-
-        # Save the return Series using strategy_id
-        all_returns[strategy_id] = returns
-
-    # Combine the individual Series into a return matrix
-    strategy_matrix = pd.DataFrame(
-        all_returns,
-        index=prices.index
-    )
-
-    return strategy_matrix
-
-def generate_strategy_returns(prices, configurations):
-    if not isinstance(prices, pd.Series):
-        raise TypeError("prices must be a Pandas Series.")
-
-    if not isinstance(prices.index, pd.DatetimeIndex):
-        raise TypeError("prices must have a DatetimeIndex.")
-
-    # Precompute data once
-    prices_array = prices.to_numpy(dtype=float)
-
-    asset_returns = prices.astype(float).pct_change().fillna(0.0)
-    returns_array = asset_returns.to_numpy()
-
-    volatility = (
-        asset_returns.rolling(20).std().shift(1).to_numpy()
-    )
-
-    # Precompute monthly indices once
-    months = prices.index.to_period("M")
-    month_indices = [
-        np.flatnonzero(months == month)
-        for month in months.unique()
-    ]
-
-    T = len(prices)
-    N = len(configurations)
-
-    # Preallocate return matrix
-    strategy_matrix = np.zeros((T, N), dtype=float)
-
-    for col, strategy in enumerate(configurations.itertuples(index=False)):
-        entry_day = int(strategy.entry_day)
-        holding_period = int(strategy.holding_period)
-        stop_loss = float(strategy.stop_loss)
-        side = int(strategy.side)
-
-        last_exit = -1
-
-        for indices in month_indices:
-
-            if entry_day > len(indices):
-                continue
-
-            entry_idx = indices[entry_day - 1]
-
-            if entry_idx <= last_exit:
-                continue
-
-            if np.isnan(volatility[entry_idx]):
-                continue
-
-            entry_price = prices_array[entry_idx]
-            stop_threshold = stop_loss * volatility[entry_idx]
-
-            exit_limit = min(
-                entry_idx + holding_period,
-                T - 1
-            )
-
-            for i in range(entry_idx + 1, exit_limit + 1):
-
-                strategy_matrix[i, col] = side * returns_array[i]
-
-                cumulative_return = side * (
-                    prices_array[i] / entry_price - 1
-                )
-
-                if cumulative_return <= -stop_threshold:
-                    last_exit = i
-                    break
-
-            else:
-                last_exit = exit_limit
-
-    return pd.DataFrame(
-        strategy_matrix,
-        index=prices.index,
-        columns=configurations["strategy_id"].to_numpy()
-    )
+    values = _validate_prices(prices)
+    if not isinstance(configurations, pd.DataFrame):
+        raise TypeError("configurations must be a Pandas DataFrame.")
+    required = {"strategy_id", "entry_day", "holding_period", "stop_loss", "side"}
+    if not required.issubset(configurations.columns):
+        raise ValueError(f"configurations must contain {sorted(required)}.")
+    if configurations.strategy_id.isna().any() or not configurations.strategy_id.is_unique:
+        raise ValueError("strategy_id values must be nonmissing and unique.")
+    entries = _entry_positions(prices.index)
+    recorded = {}
+    for strategy in configurations.itertuples(index=False):
+        _validate_rule(strategy.entry_day, strategy.holding_period,
+                       strategy.stop_loss, strategy.side, sigma)
+        observations = _trade_pnl(values, entries[strategy.entry_day],
+                                  strategy.holding_period,
+                                  strategy.stop_loss * sigma, strategy.side)
+        if np.count_nonzero(~np.isnan(observations)) > 2:
+            recorded[strategy.strategy_id] = observations
+    return pd.DataFrame(recorded, index=prices.index)
 
 
-# 4. SMALL TEST (RUNS ONLY WHEN EXECUTING THIS FILE)
+# Keep existing callers on the same trade implementation.
+generate_strategy_returns_old = generate_strategy_returns
+
 
 if __name__ == "__main__":
+    from synthetic_data import random_walk_seasonal, simulation_dates
 
-    # Generate the full configuration grid
-    configurations = generate_strategy_configurations()
-
-    print("Total configurations:", len(configurations))
-    print(configurations.head())
-
-    # Generate a small synthetic price Series
-    rng = np.random.default_rng(42)
-
-    dates = pd.bdate_range(
-        start="2020-01-01",
-        periods=100
-    )
-
-    daily_returns = rng.normal(0, 0.01, len(dates))
-
-    prices = pd.Series(
-        100 * np.cumprod(1 + daily_returns),
-        index=dates,
-        name="price"
-    )
-
-    # Test only five configurations to keep this quick
-    test_configs = configurations.head(5)
-
-    returns = generate_strategy_returns(
-        prices,
-        test_configs
-    )
-
-    print("\nTest return matrix shape:", returns.shape)
-    print("Strategy IDs:", returns.columns.tolist())
-    print("Missing values:", returns.isna().sum().sum())
-
-    assert len(configurations) == 8800
-    assert returns.shape == (100, 5)
-    assert returns.columns.tolist() == [0, 1, 2, 3, 4]
-
-    print("\nAll strategy tests passed!")
+    dates = simulation_dates(100)
+    prices = pd.Series(random_walk_seasonal(n_days=100), index=dates)
+    configurations = generate_strategy_configurations(dates)
+    active = configurations.query("holding_period == 4 and stop_loss == -10").head(5)
+    pnl = generate_strategy_returns(prices, active)
+    assert pnl.index.equals(dates)
+    assert pnl.columns.tolist() == active.strategy_id.tolist()
+    assert pnl.notna().sum().gt(2).all()
+    print("P&L matrix:", pnl.shape, "(NaN denotes an unrecorded observation)")
