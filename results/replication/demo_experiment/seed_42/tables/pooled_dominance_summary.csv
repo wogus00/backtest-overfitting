@@ -1,0 +1,3 @@
+scenario,benchmark,selected_count,benchmark_count,first_order_dominance_vs_pooled,second_order_dominance_vs_pooled
+no_signal,pooled_oos_strategy_scores,252,1915200,False,False
+seasonal,pooled_oos_strategy_scores,252,1915200,False,True

@@ -1,0 +1,16 @@
+{
+  "experiment": "demo_experiment",
+  "seed": 42,
+  "S": 10,
+  "T": 1000,
+  "sigma": 1.0,
+  "units": "price_unit_pnl",
+  "source": "https://www.quantresearch.org/CSCV_3.py.txt",
+  "calendar": "Monday-Thursday from 2000-01-01 (literal source)",
+  "rng": "random.Random(seed).gauss; paired shocks across scenarios",
+  "seasonality": "source numBusinessDays <= 5; shift 0.25 sigma",
+  "annualization": "365.25; each row owns days until the next row; last row owns one day",
+  "eligibility": "fixed universe with >2 records and positive variance in every half-split",
+  "dominance_benchmark": "mean OOS Sharpe across eligible strategies per split",
+  "reproduction": "source-style simulation; original figure seed and CSCV conventions unverified"
+}

@@ -1,0 +1,2 @@
+metric,pbo,degradation_slope,degradation_intercept,degradation_r2,degradation_defined,probability_of_loss,first_order_dominance_vs_split_mean,second_order_dominance_vs_split_mean,oos_score_benchmark,probability_below_oos_benchmark,S,T,n_strategies,n_excluded_strategies,units
+sharpe,0.051587301587301584,-0.6356270542201435,2.467623550835829,0.21416746785005603,True,0.05555555555555555,False,False,0.0,0.05555555555555555,10,1000,7600,0,price_unit_pnl

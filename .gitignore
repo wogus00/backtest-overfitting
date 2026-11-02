@@ -18,10 +18,8 @@ venv/
 !.env.example
 
 # Generated simulation data, results, and figures
-/data/
-/result/
-/results/
-/src/results/
+# /data/
+# /results/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
