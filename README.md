@@ -85,3 +85,8 @@ Outputs for the example above:
 
 The number of blocks must be even, and the observation count must be divisible
 by it. For example, use 1,008 observations with 12 or 16 blocks.
+
+
+**Results walkthrough:** See [walkthrough.ipynb](notebooks/walkthrough.ipynb)
+for a brief comparison with the paper, including saved tables and plots.
+To execute it locally, first run `demo_experiment` with seed `42`.
