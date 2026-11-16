@@ -25,5 +25,5 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["backtest_overfitting*"]
+include = ["backtest_overfitting*", "ras", "ras.*"]
 namespaces = false
